@@ -3,6 +3,6 @@ dist/
 __pycache__/
 *.pyc
 api/output/
-api/dart_corpcode.xml
+# api/dart_corpcode.xml  ← Vercel 배포용으로 포함
 .env
 *.local

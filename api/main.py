@@ -5,6 +5,7 @@ v8 account_id 기반 매핑 + 3개 회사 멀티비교 + Claude CLI AI 분석
 """
 import io, zipfile, os, json, datetime, subprocess, shutil
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -118,17 +119,24 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 # ── 기업코드 XML ──────────────────────────────────────
 def get_corp_xml():
+    # 1순위: 배포 파일 (Vercel에 커밋된 XML)
+    bundled = BASE_DIR / "dart_corpcode.xml"
+    if bundled.exists():
+        return ET.parse(bundled).getroot()
+    # 2순위: /tmp 캐시 (로컬 개발 or 재사용)
     if CACHE_XML.exists():
         age = datetime.datetime.now() - datetime.datetime.fromtimestamp(CACHE_XML.stat().st_mtime)
         if age.days < 7:
             return ET.parse(CACHE_XML).getroot()
+    # 3순위: DART API 다운로드
     with urllib.request.urlopen(
         f"https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key={DART_API_KEY}", timeout=30
     ) as r:
         zdata = r.read()
     with zipfile.ZipFile(io.BytesIO(zdata)) as z:
         xml_bytes = z.read(z.namelist()[0])
-    CACHE_XML.write_bytes(xml_bytes)
+    try: CACHE_XML.write_bytes(xml_bytes)
+    except: pass
     return ET.fromstring(xml_bytes)
 
 # ── DART fetch (account_id 기반) ──────────────────────
@@ -232,15 +240,24 @@ def search(req: SearchReq):
 def analyze_multi(req: MultiAnalyzeReq):
     if len(req.corps) != 3:
         raise HTTPException(400, "3개 기업을 입력하세요.")
+    # 병렬 DART API 호출 (3회사 × 3년 = 최대 9개 동시)
+    def fetch_one(corp_code, yr):
+        return corp_code, yr, add_ratios(fetch_by_code(corp_code, yr))
+
+    tasks = [(c["corp_code"], yr) for c in req.corps for yr in YEARS]
+    fetched = {}
+    with ThreadPoolExecutor(max_workers=9) as ex:
+        futures = {ex.submit(fetch_one, cc, yr): (cc, yr) for cc, yr in tasks}
+        for f in as_completed(futures):
+            cc, yr, data = f.result()
+            fetched.setdefault(cc, {})[yr] = data
+
     result_corps = []
     for corp in req.corps:
-        yr_data = {}
-        for yr in YEARS:
-            raw = fetch_by_code(corp["corp_code"], yr)
-            yr_data[yr] = add_ratios(raw)
+        yr_data = fetched.get(corp["corp_code"], {})
         result_corps.append({
             "corp_name": corp["corp_name"],
-            "data": {str(yr): {k:v for k,v in yr_data[yr].items() if not k.startswith("_")}
+            "data": {str(yr): {k:v for k,v in yr_data.get(yr,{}).items() if not k.startswith("_")}
                      for yr in YEARS},
         })
     # Excel 생성
