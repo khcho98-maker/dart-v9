@@ -21,8 +21,10 @@ except ImportError:
 # ── 설정 ─────────────────────────────────────────────
 DART_API_KEY = "f8692c12c4fad4928eabbfe55e957a4d29fef157"
 BASE_DIR     = Path(__file__).resolve().parent
-CACHE_XML    = BASE_DIR / "dart_corpcode.xml"
-OUTPUT_DIR   = BASE_DIR / "output"
+# Vercel 서버리스: /tmp 만 쓰기 가능
+TMP_DIR      = Path("/tmp") if Path("/tmp").exists() else BASE_DIR
+CACHE_XML    = TMP_DIR / "dart_corpcode.xml"
+OUTPUT_DIR   = TMP_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 YEARS        = [2023, 2024, 2025]
 
