@@ -5,7 +5,9 @@ import {
   Sparkles, CheckCircle2, Loader2
 } from 'lucide-react'
 
-const API = `http://${window.location.hostname}:8002`
+const API = window.location.hostname === 'localhost'
+  ? `http://localhost:8002`
+  : ''
 
 /* ── 포맷 유틸 ─────────────────────────────────── */
 const fa  = v => v == null ? '-' : (v < 0 ? `(${Math.abs(v/1e8).toLocaleString('ko-KR',{maximumFractionDigits:0})}억)` : `${(v/1e8).toLocaleString('ko-KR',{maximumFractionDigits:0})}억`)
