@@ -1,8 +1,8 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import {
   Search, FileSpreadsheet, Download, RotateCcw,
   TrendingUp, TrendingDown, Building2, ChevronRight,
-  Sparkles, CheckCircle2, Loader2
+  Sparkles, CheckCircle2, Loader2, Upload, BarChart2
 } from 'lucide-react'
 
 const API = window.location.hostname === 'localhost'
@@ -148,18 +148,42 @@ function CompanySearch({ idx, confirmed, onConfirm, onClear }) {
   )
 }
 
+/* ── 업로드 비교 단일연도 행 ─────────────────────── */
+const UploadRow = ({ label, uploadData, dartCorps, dataKey, fmt = fa, bold = false, sub = false }) => (
+  <tr className={`border-b border-gray-100 hover:bg-gray-50/50 transition ${bold ? 'font-semibold bg-gray-50/80' : ''} ${sub ? 'text-gray-400' : ''}`}>
+    <td className={`py-2.5 px-4 text-sm whitespace-nowrap ${sub ? 'pl-8' : ''}`}>{label}</td>
+    <td className="py-2.5 px-3 text-right text-sm font-mono font-bold text-amber-600">{fmt(uploadData?.[dataKey])}</td>
+    {dartCorps.map((corp, i) => (
+      <td key={i} className="py-2.5 px-3 text-right text-sm font-mono text-gray-700">{fmt(corp.data?.[dataKey])}</td>
+    ))}
+  </tr>
+)
+
 /* ══════════════════════════════════════════════════
    메인
 ══════════════════════════════════════════════════ */
 export default function DartMulti() {
+  const [activeTab,  setActiveTab]  = useState('multi')  // 'multi' | 'upload'
+
+  // 멀티비교 탭
   const [confirmed, setConfirmed]   = useState([null, null, null])
   const [step,      setStep]        = useState('input')  // input | loading | result
   const [status,    setStatus]      = useState('')
   const [error,     setError]       = useState('')
   const [result,    setResult]      = useState(null)
   const [filename,  setFilename]    = useState('')
-  const [opinions,  setOpinions]    = useState({})   // { corp_name: [lines] }
+  const [opinions,  setOpinions]    = useState({})
   const [aiLoading, setAiLoad]      = useState({})
+
+  // 업로드 비교 탭
+  const fileRef                     = useRef(null)
+  const [upFile,     setUpFile]     = useState(null)
+  const [upCorpName, setUpCorpName] = useState('')
+  const [upYear,     setUpYear]     = useState(2024)
+  const [upCorps,    setUpCorps]    = useState([null, null])  // 비교 상장사 최대 2개
+  const [upStep,     setUpStep]     = useState('input')       // input | loading | result
+  const [upResult,   setUpResult]   = useState(null)
+  const [upError,    setUpError]    = useState('')
 
   const confirm = (idx, corp) => setConfirmed(prev => { const n=[...prev]; n[idx]=corp; return n })
   const clear   = (idx)       => setConfirmed(prev => { const n=[...prev]; n[idx]=null; return n })
@@ -195,6 +219,27 @@ export default function DartMulti() {
 
   const reset = () => { setStep('input'); setConfirmed([null,null,null]); setResult(null); setOpinions({}); setError('') }
 
+  const confirmUp = (idx, corp) => setUpCorps(prev => { const n=[...prev]; n[idx]=corp; return n })
+  const clearUp   = (idx)       => setUpCorps(prev => { const n=[...prev]; n[idx]=null; return n })
+  const resetUp   = () => { setUpStep('input'); setUpFile(null); setUpCorpName(''); setUpCorps([null,null]); setUpResult(null); setUpError(''); if(fileRef.current) fileRef.current.value='' }
+
+  const doUploadCompare = async () => {
+    if (!upFile || !upCorpName.trim() || !upCorps[0]) return
+    setUpStep('loading'); setUpError('')
+    try {
+      const fd = new FormData()
+      fd.append('file', upFile)
+      fd.append('year', upYear)
+      fd.append('upload_corp_name', upCorpName.trim())
+      fd.append('comp_corps', JSON.stringify(upCorps.filter(Boolean).map(c => ({ corp_code: c.corp_code, corp_name: c.corp_name }))))
+      const res  = await fetch(`${API}/api/upload-compare`, { method: 'POST', body: fd })
+      const data = await res.json()
+      if (data.detail) throw new Error(data.detail)
+      setUpResult(data)
+      setUpStep('result')
+    } catch(e) { setUpError(`오류: ${e.message}`); setUpStep('input') }
+  }
+
   /* ── 렌더 ───────────────────────────────────── */
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-100 to-blue-50">
@@ -202,14 +247,33 @@ export default function DartMulti() {
       {/* 헤더 */}
       <header className="bg-white border-b border-gray-100 shadow-sm sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <FileSpreadsheet className="w-6 h-6 text-blue-600"/>
-            <span className="font-extrabold text-gray-900 text-lg">DART 재무분석기</span>
-            <span className="text-xs bg-blue-600 text-white font-bold px-2 py-0.5 rounded-full">v9</span>
-            <span className="text-xs text-gray-400 hidden sm:block">3개 회사 멀티 비교 · account_id 기반</span>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2.5">
+              <FileSpreadsheet className="w-6 h-6 text-blue-600"/>
+              <span className="font-extrabold text-gray-900 text-lg">DART 재무분석기</span>
+              <span className="text-xs bg-blue-600 text-white font-bold px-2 py-0.5 rounded-full">v9</span>
+            </div>
+            {/* 탭 */}
+            <div className="flex bg-gray-100 rounded-xl p-1 gap-1">
+              <button onClick={() => setActiveTab('multi')}
+                className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-sm font-semibold transition
+                  ${activeTab==='multi' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}>
+                <BarChart2 className="w-4 h-4"/> 멀티비교
+              </button>
+              <button onClick={() => setActiveTab('upload')}
+                className={`flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-sm font-semibold transition
+                  ${activeTab==='upload' ? 'bg-white text-amber-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}>
+                <Upload className="w-4 h-4"/> 내 회사 비교
+              </button>
+            </div>
           </div>
-          {step === 'result' && (
+          {activeTab==='multi' && step==='result' && (
             <button onClick={reset} className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-blue-600 transition">
+              <RotateCcw className="w-4 h-4"/> 다시 분석
+            </button>
+          )}
+          {activeTab==='upload' && upStep==='result' && (
+            <button onClick={resetUp} className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-amber-600 transition">
               <RotateCcw className="w-4 h-4"/> 다시 분석
             </button>
           )}
@@ -217,6 +281,198 @@ export default function DartMulti() {
       </header>
 
       <main className="max-w-7xl mx-auto px-6 py-10">
+
+        {/* ══════════════════════════════════════════
+            업로드 비교 탭
+        ══════════════════════════════════════════ */}
+        {activeTab === 'upload' && (
+          <>
+            {/* 입력 */}
+            {upStep === 'input' && (
+              <div className="max-w-2xl mx-auto">
+                <div className="text-center mb-10">
+                  <h1 className="text-4xl font-extrabold text-gray-900 mb-3 tracking-tight">내 회사 재무제표 비교</h1>
+                  <p className="text-gray-400">Excel 업로드 → Claude AI 파싱 → DART 상장사와 자동 비교</p>
+                </div>
+
+                <div className="bg-white rounded-3xl shadow-sm border border-gray-100 p-8 space-y-6">
+
+                  {/* 파일 업로드 */}
+                  <div>
+                    <label className="text-sm font-semibold text-gray-600 mb-2 block">재무제표 Excel 파일</label>
+                    <div
+                      onClick={() => fileRef.current?.click()}
+                      className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition
+                        ${upFile ? 'border-amber-300 bg-amber-50' : 'border-gray-200 hover:border-amber-300 hover:bg-amber-50/30'}`}>
+                      <Upload className={`w-8 h-8 mx-auto mb-2 ${upFile ? 'text-amber-500' : 'text-gray-300'}`}/>
+                      {upFile
+                        ? <p className="text-sm font-semibold text-amber-600">{upFile.name}</p>
+                        : <p className="text-sm text-gray-400">클릭하여 Excel 파일 선택 (.xlsx, .xls)</p>}
+                      <input ref={fileRef} type="file" accept=".xlsx,.xls" className="hidden"
+                        onChange={e => setUpFile(e.target.files?.[0] || null)}/>
+                    </div>
+                  </div>
+
+                  {/* 회사명 + 연도 */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-sm font-semibold text-gray-600 mb-2 block">회사명</label>
+                      <input value={upCorpName} onChange={e => setUpCorpName(e.target.value)}
+                        placeholder="예) (주)우리회사"
+                        className="w-full px-4 py-3 rounded-xl border border-gray-200 text-sm text-gray-800 placeholder-gray-300 focus:outline-none focus:ring-2 focus:ring-amber-400"/>
+                    </div>
+                    <div>
+                      <label className="text-sm font-semibold text-gray-600 mb-2 block">재무제표 연도</label>
+                      <div className="flex gap-2">
+                        {[2023, 2024, 2025].map(y => (
+                          <button key={y} onClick={() => setUpYear(y)}
+                            className={`flex-1 py-3 rounded-xl text-sm font-bold transition border
+                              ${upYear===y ? 'bg-amber-500 text-white border-amber-500' : 'bg-white text-gray-500 border-gray-200 hover:border-amber-300'}`}>
+                            {y}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 비교 상장사 */}
+                  <div>
+                    <label className="text-sm font-semibold text-gray-600 mb-3 block">비교할 상장사 (최대 2개)</label>
+                    <div className="space-y-3">
+                      {[0, 1].map(i => (
+                        <div key={i}>
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <span className={`w-5 h-5 rounded-full ${['bg-blue-500','bg-indigo-500'][i]} text-white text-xs flex items-center justify-center font-bold`}>{i+1}</span>
+                            <span className="text-xs text-gray-400">{i===0 ? '필수' : '선택'}</span>
+                          </div>
+                          <CompanySearch idx={i} confirmed={upCorps[i]}
+                            onConfirm={c => confirmUp(i,c)} onClear={() => clearUp(i)}/>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {upError && <p className="text-sm text-red-500 text-center">{upError}</p>}
+
+                  <button onClick={doUploadCompare}
+                    disabled={!upFile || !upCorpName.trim() || !upCorps[0]}
+                    className={`w-full py-4 rounded-2xl font-bold text-white text-base transition shadow-md
+                      ${upFile && upCorpName.trim() && upCorps[0]
+                        ? 'bg-amber-500 hover:bg-amber-600 shadow-amber-200'
+                        : 'bg-gray-300 cursor-not-allowed'}`}>
+                    비교 분석 시작 <ChevronRight className="inline w-5 h-5"/>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* 로딩 */}
+            {upStep === 'loading' && (
+              <div className="text-center py-32">
+                <Loader2 className="w-16 h-16 text-amber-500 animate-spin mx-auto mb-6"/>
+                <p className="text-gray-500 text-lg font-medium">Claude AI가 Excel을 분석 중입니다...</p>
+                <p className="text-gray-300 text-sm mt-2">형식에 관계없이 재무 항목을 자동으로 추출합니다</p>
+              </div>
+            )}
+
+            {/* 결과 */}
+            {upStep === 'result' && upResult && (() => {
+              const { upload_corp, dart_corps, year } = upResult
+              const allCorps = [
+                { corp_name: upload_corp.corp_name, data: upload_corp.data, isUpload: true },
+                ...dart_corps.map(c => ({ ...c, isUpload: false }))
+              ]
+              return (
+                <div className="space-y-8">
+                  <div>
+                    <h2 className="text-2xl font-extrabold text-gray-900">
+                      <span className="text-amber-500">{upload_corp.corp_name}</span>
+                      {dart_corps.map(c => <span key={c.corp_name} className="text-gray-400"> · {c.corp_name}</span>)}
+                    </h2>
+                    <p className="text-sm text-gray-400 mt-1">{year}년 재무제표 비교 · 억원 단위</p>
+                    {upload_corp.error && (
+                      <p className="text-sm text-red-400 mt-2 bg-red-50 px-4 py-2 rounded-xl">⚠️ {upload_corp.error}</p>
+                    )}
+                  </div>
+
+                  {/* KPI */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    {[
+                      { label: `${year} 매출`, key: '매출', fmt: fa, color: 'blue' },
+                      { label: `${year} 영업이익`, key: '영업이익', fmt: fa, color: 'green' },
+                      { label: `${year} 영업이익률`, key: '영업이익률', fmt: fp, color: 'purple' },
+                      { label: `${year} 부채비율`, key: '부채비율', fmt: fp, color: 'red' },
+                    ].map(({ label, key, fmt, color }) => (
+                      <KPI key={key} color={color} label={label} fmt={fmt}
+                        values={allCorps.map(c => ({ name: c.corp_name, val: c.data?.[key] }))}/>
+                    ))}
+                  </div>
+
+                  {/* 비교 테이블 */}
+                  <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-x-auto">
+                    <table className="w-full min-w-[600px]">
+                      <thead>
+                        <tr className="bg-slate-800 text-white text-xs">
+                          <th className="text-left py-3 px-4 font-semibold w-40">항목</th>
+                          <th className="text-right py-3 px-4 font-bold text-amber-300">{upload_corp.corp_name}</th>
+                          {dart_corps.map(c => (
+                            <th key={c.corp_name} className="text-right py-3 px-4 font-semibold">{c.corp_name}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <SecHead title="손익계산서" color="bg-blue-700"/>
+                        {[
+                          ['매출(영업수익)', '매출', fa, true],
+                          ['매출원가', '매출원가', fa, false],
+                          ['매출총이익', '매출총이익', fa, false],
+                          ['판매비와관리비', '판매비와관리비', fa, false],
+                          ['영업이익', '영업이익', fa, true],
+                          ['당기순이익', '당기순이익', fa, true],
+                          ['EPS', 'EPS', feps, false],
+                        ].map(([label, key, fmt, bold]) => (
+                          <UploadRow key={key} label={label} uploadData={upload_corp.data}
+                            dartCorps={dart_corps} dataKey={key} fmt={fmt} bold={bold}/>
+                        ))}
+                        <SecHead title="재무상태표" color="bg-emerald-700"/>
+                        {[
+                          ['자산총계', '자산총계', fa, true],
+                          ['부채총계', '부채총계', fa, true],
+                          ['자본총계', '자본총계', fa, true],
+                          ['이익잉여금', '이익잉여금', fa, false],
+                        ].map(([label, key, fmt, bold]) => (
+                          <UploadRow key={key} label={label} uploadData={upload_corp.data}
+                            dartCorps={dart_corps} dataKey={key} fmt={fmt} bold={bold}/>
+                        ))}
+                        <SecHead title="투자지표" color="bg-purple-700"/>
+                        {[
+                          ['영업이익률', '영업이익률', fp, false],
+                          ['순이익률', '순이익률', fp, false],
+                          ['ROE', 'ROE', fp, false],
+                          ['부채비율', '부채비율', fp, false],
+                          ['유동비율', '유동비율', fp, false],
+                        ].map(([label, key, fmt, bold]) => (
+                          <UploadRow key={key} label={label} uploadData={upload_corp.data}
+                            dartCorps={dart_corps} dataKey={key} fmt={fmt} bold={bold}/>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <p className="text-center text-xs text-gray-400">
+                    ※ 업로드 회사(<span className="text-amber-500 font-bold">{upload_corp.corp_name}</span>)는 Claude AI 파싱 기반 · DART 상장사는 공시 데이터 기준
+                  </p>
+                </div>
+              )
+            })()}
+          </>
+        )}
+
+        {/* ══════════════════════════════════════════
+            멀티비교 탭
+        ══════════════════════════════════════════ */}
+        {activeTab === 'multi' && (
+        <>
 
         {/* ── 입력 화면 ──────────────────────────── */}
         {step === 'input' && (
@@ -386,6 +642,9 @@ export default function DartMulti() {
             </p>
           </div>
         )}
+        </> // 멀티비교 탭 끝
+        )}
+
       </main>
     </div>
   )

@@ -3,10 +3,10 @@ DART 재무분석기 v9 — FastAPI 백엔드
 v8 account_id 기반 매핑 + 3개 회사 멀티비교 + Claude CLI AI 분석
 포트: 8002
 """
-import io, zipfile, os, json, datetime, subprocess, shutil
+import io, zipfile, os, json, datetime, subprocess, shutil, re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -20,7 +20,7 @@ except ImportError:
     raise SystemExit("pip install openpyxl")
 
 # ── 설정 ─────────────────────────────────────────────
-DART_API_KEY = "f8692c12c4fad4928eabbfe55e957a4d29fef157"
+DART_API_KEY = "7fbe11d3247fccedae35f1e4c2d3de5b7473e4bb"
 BASE_DIR     = Path(__file__).resolve().parent
 # Vercel 서버리스: /tmp 만 쓰기 가능
 TMP_DIR      = Path("/tmp") if Path("/tmp").exists() else BASE_DIR
@@ -208,6 +208,70 @@ def get_ai_opinion(corp_name: str, corp_data: dict) -> list[str]:
     except Exception as e:
         return [f"오류: {e}"]
 
+# ── Excel → Claude CLI 파싱 ──────────────────────
+def parse_excel_via_claude(file_bytes: bytes, year: int) -> dict:
+    """임의 형식의 재무제표 Excel을 Claude CLI로 파싱해 표준 계정 dict 반환"""
+    if not CLAUDE_CLI:
+        return {"_error": "Claude CLI 없음"}
+
+    # 1. openpyxl로 모든 시트 텍스트 추출
+    try:
+        wb = __import__("openpyxl").load_workbook(io.BytesIO(file_bytes), data_only=True)
+    except Exception as e:
+        return {"_error": f"Excel 읽기 실패: {e}"}
+
+    # 재무제표 관련 시트 우선 (손익/재무/P&L 포함 시트)
+    priority = ["손익","재무","income","profit","balance","p&l","pl"]
+    sheets = sorted(wb.worksheets,
+                    key=lambda ws: 0 if any(p in ws.title.lower() for p in priority) else 1)
+
+    text = ""
+    for ws in sheets:
+        text += f"\n[시트: {ws.title}]\n"
+        for row in ws.iter_rows(values_only=True):
+            cells = [str(c).strip() for c in row if c is not None and str(c).strip()]
+            if cells:
+                text += " | ".join(cells) + "\n"
+        if len(text) > 7000:
+            break
+
+    # 2. Claude CLI 프롬프트
+    prompt = f"""아래는 {year}년 재무제표 Excel 내용입니다.
+다음 표준 항목의 숫자를 추출해서 JSON으로만 반환하세요.
+- 단위가 원이면 그대로, 천원이면 ×1000, 백만원이면 ×1000000으로 변환
+- 없는 항목은 null
+- 반드시 JSON만 출력 (설명, 마크다운 코드블록 없이)
+
+추출 항목:
+매출, 매출원가, 매출총이익, 판매비와관리비, 영업이익,
+금융수익, 금융비용, 법인세비용차감전순이익, 법인세비용, 당기순이익,
+유동자산, 비유동자산, 자산총계, 유동부채, 비유동부채,
+부채총계, 이익잉여금, 자본총계
+
+출력 형식 예시:
+{{"매출": 500000000000, "영업이익": 30000000000, "자산총계": 1000000000000, ...}}
+
+Excel 내용:
+{text[:7000]}"""
+
+    try:
+        r = subprocess.run(CLAUDE_CLI + " --print -", input=prompt,
+                           capture_output=True, text=True,
+                           encoding="utf-8", timeout=120, shell=True)
+        # JSON 추출
+        m = re.search(r'\{[^{}]*\}', r.stdout, re.DOTALL)
+        if m:
+            raw = json.loads(m.group())
+            result = {}
+            for k, v in raw.items():
+                try:    result[k] = int(v) if v is not None else None
+                except: result[k] = None
+            return add_ratios(result)
+    except Exception as e:
+        return {"_error": str(e)}
+    return {"_error": "파싱 결과 없음"}
+
+
 # ── API 엔드포인트 ────────────────────────────────────
 class SearchReq(BaseModel):
     name: str
@@ -266,6 +330,42 @@ def analyze_multi(req: MultiAnalyzeReq):
     filename = f"멀티비교_{names}_{today}.xlsx"
     _make_excel(result_corps, OUTPUT_DIR / filename)
     return {"corps": result_corps, "filename": filename}
+
+@app.post("/api/upload-compare")
+async def upload_compare(
+    file: UploadFile = File(...),
+    year: int = Form(...),
+    upload_corp_name: str = Form(...),
+    comp_corps: str = Form(...),   # JSON: [{"corp_code":"...","corp_name":"..."}]
+):
+    """비상장사 Excel 업로드 + DART 상장사 비교"""
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(400, "파일이 비어 있습니다.")
+
+    # 1. Excel → Claude CLI 파싱
+    uploaded = parse_excel_via_claude(file_bytes, year)
+
+    # 2. DART 상장사 데이터 수집
+    corps_list = json.loads(comp_corps)
+    dart_results = []
+    for corp in corps_list:
+        raw = fetch_by_code(corp["corp_code"], year)
+        dart_results.append({
+            "corp_name": corp["corp_name"],
+            "data": {k: v for k, v in add_ratios(raw).items() if not k.startswith("_")}
+        })
+
+    return {
+        "upload_corp": {
+            "corp_name": upload_corp_name,
+            "data": {k: v for k, v in uploaded.items() if not k.startswith("_")},
+            "error": uploaded.get("_error"),
+        },
+        "dart_corps": dart_results,
+        "year": year,
+    }
+
 
 @app.post("/api/opinion")
 def opinion(req: OpinionReq):
